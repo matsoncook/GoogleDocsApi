@@ -79,15 +79,53 @@ def chunk_text(s: str, max_len: int = 45000) -> List[str]:
     return [s[i : i + max_len] for i in range(0, len(s), max_len)] if s else []
 
 
-def create_google_doc(title: str, creds: Credentials) -> str:
-    docs = build("docs", "v1", credentials=creds)
-    doc = docs.documents().create(body={"title": title}).execute()
-    return doc["documentId"]
+def create_google_doc(title: str, creds: Credentials, folder_id: str = None) -> str:
+    drive = build("drive", "v3", credentials=creds)
 
+    file_metadata = {
+        "name": title,
+        "mimeType": "application/vnd.google-apps.document",
+    }
+
+    if folder_id:
+        file_metadata["parents"] = [folder_id]
+
+    file = drive.files().create(body=file_metadata, fields="id").execute()
+    return file["id"]
+def get_doc_end_index(docs, doc_id) -> int:
+    # Get the current end index of the document (last content element's endIndex)
+    doc = docs.documents().get(documentId=doc_id, fields="body/content").execute()
+    content = doc.get("body", {}).get("content", [])
+    return content[-1]["endIndex"] if content else 1  # 1 is start of body
+# Insert header
+def insert_header(docs,doc_id,header_text):
+    if not header_text.endswith("\n"):
+        header_text += "\n"
+
+    # Find where to insert (the end of the doc, before the final implicit newline)
+    end_index = get_doc_end_index(docs, doc_id)
+    insert_at = max(1, end_index - 1)  # Docs have a trailing newline; insert before it
+
+    docs.documents().batchUpdate(
+        documentId=doc_id,
+        body={
+            "requests": [
+                {"insertText": {"endOfSegmentLocation": {}, "text": header_text}},
+                {
+                    "updateParagraphStyle": {
+                        "range": {"startIndex": insert_at, "endIndex": len(header_text)+1},
+                        "paragraphStyle": {"namedStyleType": "HEADING_1"},
+                        "fields": "namedStyleType",
+                    }
+                },
+            ]
+        },
+    ).execute()
 
 def append_text_to_doc(doc_id: str, text: str, creds: Credentials) -> None:
     docs = build("docs", "v1", credentials=creds)
     # Use endOfSegmentLocation to always append at the end
+    insert_header(docs, doc_id, "hello")
     for piece in chunk_text(text):
         docs.documents().batchUpdate(
             documentId=doc_id,
@@ -139,6 +177,10 @@ def main():
         action="store_true",
         help="Recurse into subdirectories (equivalent to using pattern='**/*.txt').",
     )
+    parser.add_argument(
+        "--folder",
+        help="Google Drive folder ID where the doc should be created",
+    )
     args = parser.parse_args()
 
     base_dir = args.directory.resolve()
@@ -154,7 +196,7 @@ def main():
     combined = build_combined_text(files, base_dir, args.encoding)
 
     creds = get_credentials()
-    doc_id = create_google_doc(args.title, creds)
+    doc_id = create_google_doc(args.title, creds, args.folder)
     append_text_to_doc(doc_id, combined, creds)
 
     # Provide a Drive link (Docs URLs follow this pattern)
